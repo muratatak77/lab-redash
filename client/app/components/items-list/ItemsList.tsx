@@ -1,0 +1,263 @@
+import { omit, debounce, isEqual, pick } from "lodash";
+import React from "react";
+import PropTypes from "prop-types";
+import hoistNonReactStatics from "hoist-non-react-statics";
+import { clientConfig } from "@/services/auth";
+import { AxiosError } from "axios";
+
+export interface PaginationOptions {
+  page?: number;
+  itemsPerPage?: number;
+}
+
+export interface SearchOptions {
+  isServerSideFTS?: boolean;
+}
+
+export interface Controller<I, P = any> {
+  params: P; // TODO: Find out what params is (except merging with props)
+
+  isLoaded: boolean;
+  isEmpty: boolean;
+
+  // search
+  searchTerm?: string;
+  searchInputVersion: number;
+  updateSearch: (searchTerm: string, searchOptions?: SearchOptions) => void;
+
+  // tags
+  selectedTags: string[];
+  updateSelectedTags: (selectedTags: string[]) => void;
+
+  // sorting
+  orderByField?: string;
+  orderByReverse: boolean;
+  toggleSorting: (orderByField: string) => void;
+  setSorting: (orderByField: string, orderByReverse: boolean) => void;
+
+  // pagination
+  page: number;
+  itemsPerPage: number;
+  totalItemsCount: number;
+  pageSizeOptions: number[];
+  pageItems: I[];
+  updatePagination: (options: PaginationOptions) => void; // ({ page: number, itemsPerPage: number }) => void
+
+  handleError: (error: any) => void; // TODO: Find out if error is string or object or Exception.
+}
+
+export const ControllerType = PropTypes.shape({
+  // values of props declared by wrapped component and some additional props from items list
+  params: PropTypes.object.isRequired,
+
+  isLoaded: PropTypes.bool.isRequired,
+  isEmpty: PropTypes.bool.isRequired,
+
+  // search
+  searchTerm: PropTypes.string,
+  searchInputVersion: PropTypes.number.isRequired,
+  updateSearch: PropTypes.func.isRequired, // (searchTerm: string) => void
+
+  // tags
+  selectedTags: PropTypes.array.isRequired,
+  updateSelectedTags: PropTypes.func.isRequired, // (selectedTags: array of tags) => void
+
+  // sorting
+  orderByField: PropTypes.string,
+  orderByReverse: PropTypes.bool.isRequired,
+  toggleSorting: PropTypes.func.isRequired, // (orderByField: string) => void
+
+  // pagination
+  page: PropTypes.number.isRequired,
+  itemsPerPage: PropTypes.number.isRequired,
+  totalItemsCount: PropTypes.number.isRequired,
+  pageSizeOptions: PropTypes.arrayOf(PropTypes.number).isRequired,
+  pageItems: PropTypes.array.isRequired,
+  updatePagination: PropTypes.func.isRequired, // ({ page: number, itemsPerPage: number }) => void
+
+  handleError: PropTypes.func.isRequired, // (error) => void
+});
+
+export type GenericItemSourceError = AxiosError | Error;
+
+export interface ItemsListWrapperProps {
+  onError?: (error: AxiosError | Error) => void;
+  children: React.ReactNode;
+}
+
+interface ItemsListWrapperState<I, P = any> extends Controller<I, P> {
+  totalCount?: number;
+  update: () => void;
+}
+
+type ItemsSource = any; // TODO: Type ItemsSource
+type StateStorage = any; // TODO: Type StateStore
+
+export interface ItemsListWrappedComponentProps<I, P = any> {
+  controller: Controller<I, P>;
+  children?: React.ReactNode;
+}
+
+export function wrap<I, P = any>(
+  WrappedComponent: React.ComponentType<ItemsListWrappedComponentProps<I>>,
+  createItemsSource: () => ItemsSource,
+  createStateStorage: ({ ...props }) => StateStorage
+) {
+  class ItemsListWrapper extends React.Component<ItemsListWrapperProps, ItemsListWrapperState<I, P>> {
+    private _itemsSource: ItemsSource;
+
+    private _stateStorage: StateStorage;
+
+    private _unlisten?: () => void;
+
+    private _cancelPendingSearch: () => void;
+
+    private _searchInputVersion = 0;
+
+    static propTypes = {
+      onError: PropTypes.func,
+      children: PropTypes.node,
+    };
+
+    static defaultProps = {
+      onError: (error: GenericItemSourceError) => {
+        // Allow calling chain to roll up, and then throw the error in global context
+        setTimeout(() => {
+          throw error;
+        });
+      },
+      children: null,
+    };
+
+    constructor(props: ItemsListWrapperProps) {
+      super(props);
+
+      const stateStorage = createStateStorage({ ...props });
+      this._stateStorage = stateStorage;
+      const itemsSource = createItemsSource();
+      this._itemsSource = itemsSource;
+
+      itemsSource.setState({ ...stateStorage.getState(), validate: false });
+      itemsSource.getCallbackContext = () => this.state;
+
+      itemsSource.onBeforeUpdate = () => {
+        const state = itemsSource.getState();
+        stateStorage.setState(state);
+        this.setState(this.getState({ ...state, isLoaded: false }));
+      };
+
+      itemsSource.onAfterUpdate = () => {
+        const state = itemsSource.getState();
+        this.setState(this.getState({ ...state, isLoaded: true }));
+      };
+
+      itemsSource.onError = (error: GenericItemSourceError) => this.props.onError!(error);
+
+      const initialState = this.getState({ ...itemsSource.getState(), isLoaded: false });
+      const { updatePagination, toggleSorting, setSorting, updateSearch, updateSelectedTags, update, handleError } =
+        itemsSource;
+
+      let isRunningUpdateSearch = false;
+      let pendingUpdateSearchParams: any[] | null = null;
+      const debouncedUpdateSearch = debounce(async (...params) => {
+        // Avoid running multiple updateSerch concurrently.
+        // If an updateSearch is already running, we save the params for the latest call.
+        // When the current updateSearch is finished, we call debouncedUpdateSearch again with the saved params.
+        if (isRunningUpdateSearch) {
+          pendingUpdateSearchParams = params;
+          return;
+        }
+        isRunningUpdateSearch = true;
+        await updateSearch(...params);
+        isRunningUpdateSearch = false;
+        if (pendingUpdateSearchParams) {
+          const pendingParams = pendingUpdateSearchParams;
+          pendingUpdateSearchParams = null;
+          debouncedUpdateSearch(...pendingParams);
+        }
+      }, 200);
+
+      this._cancelPendingSearch = () => {
+        debouncedUpdateSearch.cancel();
+        pendingUpdateSearchParams = null;
+      };
+
+      this.state = {
+        ...initialState,
+        toggleSorting,
+        setSorting,
+        updateSearch: debouncedUpdateSearch,
+        updateSelectedTags,
+        updatePagination,
+        update,
+        handleError,
+      };
+    }
+
+    componentDidMount() {
+      this._unlisten = this._stateStorage.listen((state: Record<string, unknown>) => {
+        const currentState = pick(this._itemsSource.getState(), Object.keys(state));
+        // Relevance ordering has no direction, even if the previous sort was descending.
+        if (!state.orderByField && !currentState.orderByField) {
+          currentState.orderByReverse = state.orderByReverse;
+        }
+        // Ignore our own URL writes and changes to unrelated URL parameters.
+        if (!isEqual(currentState, state)) {
+          this._cancelPendingSearch();
+          // Reset the input draft even when navigation restores the same search term.
+          this._searchInputVersion += 1;
+          this._itemsSource.setState({ ...state, validate: false });
+          this._itemsSource.update();
+        }
+      });
+      this.state.update();
+    }
+
+    componentWillUnmount() {
+      this._unlisten?.();
+      this._cancelPendingSearch();
+      this._itemsSource.onBeforeUpdate = () => {};
+      this._itemsSource.onAfterUpdate = () => {};
+      this._itemsSource.onError = () => {};
+    }
+
+    getState({
+      isLoaded,
+      totalCount,
+      pageItems,
+      params,
+      ...rest
+    }: ItemsListWrapperState<I, P>): ItemsListWrapperState<I, P> {
+      return {
+        ...rest,
+        searchInputVersion: this._searchInputVersion,
+
+        params: {
+          ...params, // custom params from items source
+          ...omit(this.props, ["onError", "children"]), // add all props except of own ones
+        },
+
+        isLoaded,
+        isEmpty: !isLoaded || totalCount === 0,
+        totalItemsCount: totalCount || 0,
+        pageSizeOptions: (clientConfig as any).pageSizeOptions, // TODO: Type auth.js
+        pageItems: pageItems || [],
+      };
+    }
+
+    render() {
+      // don't pass own props to wrapped component
+      const { children, onError, ...props } = this.props;
+      return (
+        <WrappedComponent {...props} controller={this.state}>
+          {children}
+        </WrappedComponent>
+      );
+    }
+  }
+
+  // Copy static methods from `WrappedComponent`
+  hoistNonReactStatics(ItemsListWrapper, WrappedComponent);
+
+  return ItemsListWrapper;
+}

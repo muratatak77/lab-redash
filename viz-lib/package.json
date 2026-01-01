@@ -1,0 +1,146 @@
+{
+  "name": "@redash/viz",
+  "version": "1.0.0",
+  "description": "Redash visualizations",
+  "main": "dist/redash-visualizations.js",
+  "scripts": {
+    "clean": "rm -rf lib dist",
+    "type-check": "tsc --noEmit",
+    "type-gen": "tsc --emitDeclarationOnly",
+    "build:babel:base": "babel src --out-dir lib --source-maps --ignore 'src/**/*.test.js,src/**/*.d.ts' --copy-files --no-copy-ignored --extensions .ts,.tsx,.js,.jsx",
+    "build:babel": "pnpm run type-gen && pnpm run build:babel:base",
+    "build:webpack": "webpack",
+    "build": " NODE_ENV=production npm-run-all clean build:babel build:webpack",
+    "watch:babel": "pnpm run build:babel:base --watch",
+    "watch:webpack": "webpack --watch",
+    "watch": "npm-run-all --parallel watch:*",
+    "version": "pnpm run build",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getredash/redash.git"
+  },
+  "author": "Redash",
+  "license": "BSD-2-Clause",
+  "peerDependencies": {
+    "@ant-design/icons": ">=4.0.0",
+    "antd": ">=4.0.0",
+    "react": ">=18.0.0 <19.0.0",
+    "react-dom": ">=18.0.0 <19.0.0"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "^4.8.3",
+    "@babel/cli": "^8.0.6",
+    "@babel/core": "^8.0.6",
+    "@babel/plugin-transform-class-properties": "^8.0.1",
+    "@babel/preset-env": "^8.0.6",
+    "@babel/preset-react": "^8.0.1",
+    "@babel/preset-typescript": "^8.0.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/chroma-js": "^3.1.2",
+    "@types/d3": "^7.4.3",
+    "@types/d3-cloud": "^1.2.3",
+    "@types/debug": "^4.1.13",
+    "@types/jest": "^30.0.0",
+    "@types/leaflet": "^1.9.22",
+    "@types/numeral": "0.0.28",
+    "@types/plotly.js": "^3.0.14",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/react-pivottable": "^0.11.6",
+    "@types/tinycolor2": "^1.4.2",
+    "antd": "4.24.16",
+    "babel-jest": "^30.5.2",
+    "babel-loader": "^10.1.1",
+    "babel-plugin-istanbul": "^8.0.0",
+    "babel-plugin-module-resolver": "^5.0.3",
+    "css-loader": "^7.1.5",
+    "jest": "^30.5.2",
+    "less": "^4.9.1",
+    "less-loader": "^13.0.0",
+    "less-plugin-autoprefix": "^2.0.0",
+    "npm-run-all": "^4.1.5",
+    "prop-types": "^15.7.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "style-loader": "^4.0.0",
+    "typescript": "^6.0.3",
+    "webpack": "^5.111.1",
+    "webpack-cli": "^7.2.3"
+  },
+  "files": [
+    "dist",
+    "lib"
+  ],
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/modifiers": "^9.0.0",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "axios": "1.20.0",
+    "axios-auth-refresh": "5.0.2",
+    "beautifymarker": "^1.0.7",
+    "chroma-js": "^3.2.0",
+    "classnames": "^2.2.6",
+    "d3": "^7.9.0",
+    "d3-cloud": "^1.2.9",
+    "debug": "^4.4.3",
+    "dompurify": "^3.4.17",
+    "font-awesome": "^4.7.0",
+    "hoist-non-react-statics": "^3.3.0",
+    "leaflet": "~1.9.4",
+    "leaflet-fullscreen": "^1.0.2",
+    "leaflet.markercluster": "^1.1.0",
+    "lodash": "^4.18.1",
+    "numeral": "^2.0.6",
+    "plotly.js": "3.7.0",
+    "react-pivottable": "^0.11.1",
+    "react-plotly.js": "^4.1.0",
+    "tinycolor2": "^1.4.1",
+    "use-debounce": "^10.1.1",
+    "use-media": "^1.4.0"
+  },
+  "jest": {
+    "rootDir": "./src",
+    "testEnvironment": "jsdom",
+    "transform": {
+      "[\\\\/]node_modules[\\\\/].+\\.m?js$": [
+        "<rootDir>/../node_modules/babel-jest",
+        {
+          "presets": [
+            [
+              "@babel/preset-env",
+              {
+                "targets": {
+                  "node": "current"
+                }
+              }
+            ]
+          ]
+        }
+      ],
+      "\\.[jt]sx?$": "<rootDir>/../node_modules/babel-jest"
+    },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!\\.pnpm/|(d3|d3-[a-z-]+|internmap|delaunator|robust-predicates)/)",
+      "/node_modules/\\.pnpm/(?!(d3|d3-[a-z-]+|internmap|delaunator|robust-predicates)@)"
+    ],
+    "setupFiles": [
+      "../__tests__/mocks.js"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)": "<rootDir>/$1",
+      "\\.(css|less)$": "identity-obj-proxy"
+    }
+  },
+  "browser": {
+    "fs": false,
+    "path": false
+  },
+  "browserslist": [
+    "defaults"
+  ]
+}

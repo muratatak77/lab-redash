@@ -1,0 +1,190 @@
+{
+  "name": "redash-client",
+  "version": "26.11.0-dev",
+  "description": "The frontend part of Redash.",
+  "main": "index.js",
+  "scripts": {
+    "start": "npm-run-all --parallel watch:viz webpack-dev-server",
+    "clean": "rm -rf ./client/dist/",
+    "build:viz": "pnpm --filter @redash/viz build:babel",
+    "build": "pnpm run clean && pnpm run build:viz && NODE_ENV=production webpack",
+    "watch:app": "webpack watch --progress",
+    "watch:viz": "pnpm --filter @redash/viz watch:babel",
+    "watch": "npm-run-all --parallel watch:*",
+    "webpack-dev-server": "webpack-dev-server",
+    "analyze": "pnpm run clean && BUNDLE_ANALYZER=on webpack",
+    "analyze:build": "pnpm run clean && NODE_ENV=production BUNDLE_ANALYZER=on webpack",
+    "lint": "biome check --error-on-warnings",
+    "lint:fix": "biome check --write",
+    "lint:ci": "mkdir -p /tmp/test-results/biome && biome ci --error-on-warnings --reporter=default --reporter=junit --reporter-file=/tmp/test-results/biome/results.xml",
+    "format": "biome format --write",
+    "type-check": "tsc --noEmit --project client/tsconfig.json",
+    "type-check:watch": "pnpm run type-check --watch",
+    "jest": "TZ=Africa/Khartoum jest",
+    "test": "run-s type-check jest",
+    "test:watch": "jest --watch",
+    "visual-tests": "playwright test --config client/visual-tests/playwright.config.ts",
+    "visual-tests:docker": "sh client/visual-tests/docker.sh",
+    "e2e": "playwright test --config client/e2e/playwright.config.ts",
+    "e2e:type-check": "tsc --noEmit --project client/e2e/tsconfig.json",
+    "postinstall": "pnpm run build:viz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getredash/redash.git"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": "^22.18.0 || >=24.11.0 <26.0.0"
+  },
+  "author": "Redash Contributors",
+  "license": "BSD-2-Clause",
+  "bugs": {
+    "url": "https://github.com/getredash/redash/issues"
+  },
+  "homepage": "https://redash.io/",
+  "dependencies": {
+    "@ant-design/icons": "^4.2.1",
+    "@redash/viz": "workspace:*",
+    "ace-builds": "^1.44.0",
+    "antd": "4.24.16",
+    "axios": "1.20.0",
+    "axios-auth-refresh": "5.0.2",
+    "bootstrap": "^3.4.1",
+    "buffer": "^5.7.1",
+    "classnames": "^2.2.6",
+    "core-js": "^3.50.0",
+    "d3": "^7.9.0",
+    "debug": "^4.4.3",
+    "dompurify": "^3.4.17",
+    "font-awesome": "^4.7.0",
+    "history": "^4.10.1",
+    "hoist-non-react-statics": "^3.3.0",
+    "marked": "^18.0.14",
+    "material-design-iconic-font": "^2.2.0",
+    "mousetrap": "^1.6.1",
+    "mustache": "^4.2.0",
+    "numeral": "^2.0.6",
+    "prop-types": "^15.6.1",
+    "query-string": "^9.5.1",
+    "react": "18.3.1",
+    "react-ace": "^15.0.0",
+    "react-dom": "18.3.1",
+    "react-grid-layout": "^2.2.4",
+    "react-resizable": "^3.2.0",
+    "react-virtualized": "^9.21.2",
+    "sql-formatter": "git+https://github.com/getredash/sql-formatter.git",
+    "universal-router": "^10.0.3",
+    "use-debounce": "^10.1.1",
+    "use-media": "^1.4.0"
+  },
+  "devDependencies": {
+    "@babel/cli": "^8.0.6",
+    "@babel/core": "^8.0.6",
+    "@babel/plugin-transform-class-properties": "^8.0.1",
+    "@babel/preset-env": "^8.0.6",
+    "@babel/preset-react": "^8.0.1",
+    "@babel/preset-typescript": "^8.0.1",
+    "@biomejs/biome": "2.5.14",
+    "@playwright/test": "1.63.0",
+    "@pmmmwh/react-refresh-webpack-plugin": "^0.6.3",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/hoist-non-react-statics": "^3.3.1",
+    "@types/lodash": "^4.17.25",
+    "@types/node": "^22.18.0",
+    "@types/prop-types": "^15.7.3",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@types/sql-formatter": "^2.3.0",
+    "assert": "^2.1.0",
+    "atob": "^2.1.2",
+    "babel-jest": "^30.5.2",
+    "babel-loader": "^10.1.1",
+    "babel-plugin-istanbul": "^8.0.0",
+    "babel-plugin-polyfill-corejs3": "^1.0.0",
+    "copy-webpack-plugin": "^14.0.0",
+    "css-loader": "^7.1.5",
+    "dayjs": "^1.11.23",
+    "html-webpack-plugin": "^5.6.8",
+    "identity-obj-proxy": "^3.0.0",
+    "jest": "^30.5.2",
+    "jest-environment-jsdom": "^30.5.2",
+    "less": "^4.9.1",
+    "less-loader": "^13.0.0",
+    "less-plugin-autoprefix": "^2.0.0",
+    "lodash": "^4.18.1",
+    "mini-css-extract-plugin": "^2.10.2",
+    "mockdate": "^3.0.5",
+    "npm-run-all": "^4.1.5",
+    "process": "^0.11.10",
+    "react-refresh": "^0.19.0",
+    "source-map-loader": "^5.0.0",
+    "stream-browserify": "^3.0.0",
+    "style-loader": "^4.0.0",
+    "typescript": "^6.0.3",
+    "url": "^0.11.4",
+    "webpack": "^5.111.1",
+    "webpack-build-notifier": "^3.1.0",
+    "webpack-bundle-analyzer": "^5.4.0",
+    "webpack-cli": "^7.2.3",
+    "webpack-dev-server": "^6.0.0",
+    "webpack-manifest-plugin": "^6.0.1"
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.3.2"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "rootDir": "./client",
+    "transform": {
+      "[\\\\/]node_modules[\\\\/].+\\.m?js$": [
+        "<rootDir>/../node_modules/babel-jest",
+        {
+          "presets": [
+            [
+              "@babel/preset-env",
+              {
+                "targets": {
+                  "node": "current"
+                }
+              }
+            ]
+          ]
+        }
+      ],
+      "\\.[jt]sx?$": "<rootDir>/../node_modules/babel-jest"
+    },
+    "transformIgnorePatterns": [
+      "/node_modules/(?!\\.pnpm/|(marked|universal-router|query-string|decode-uri-component|split-on-first|filter-obj|d3|d3-[a-z-]+|internmap|delaunator|robust-predicates)/)",
+      "/node_modules/\\.pnpm/(?!(marked|universal-router|query-string|decode-uri-component|split-on-first|filter-obj|d3|d3-[a-z-]+|internmap|delaunator|robust-predicates)@)"
+    ],
+    "setupFiles": [
+      "./app/__tests__/mocks.js"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)": "<rootDir>/app/$1",
+      "^universal-router$": "<rootDir>/../node_modules/universal-router/universal-router.js",
+      "^universal-router/path-to-regexp$": "<rootDir>/../node_modules/universal-router/path-to-regexp.js",
+      "\\.(css|less)$": "identity-obj-proxy"
+    },
+    "testPathIgnorePatterns": [
+      "<rootDir>/app/__tests__/",
+      "<rootDir>/visual-tests/",
+      "<rootDir>/e2e/"
+    ]
+  },
+  "browser": {
+    "fs": false,
+    "path": false
+  },
+  "browserslist": [
+    "defaults"
+  ],
+  "pnpm": {
+    "overrides": {
+      "cheerio": "1.0.0-rc.12",
+      "form-data@2": "~2.5.4"
+    }
+  }
+}

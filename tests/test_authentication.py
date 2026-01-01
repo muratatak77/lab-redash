@@ -1,0 +1,899 @@
+import importlib
+import json
+import os
+import subprocess
+import time
+from urllib.parse import urlsplit
+
+import jwcrypto.jwk
+import jwt
+import requests
+from flask import request
+from mock import Mock, patch
+from sqlalchemy.orm.exc import NoResultFound
+
+from redash import models, settings
+from redash.authentication import (
+    api_key_load_user_from_request,
+    get_login_url,
+    hmac_load_user_from_request,
+    jwt_auth,
+    oidc,
+    org_settings,
+    sign,
+)
+from redash.authentication.google_oauth import (
+    create_and_login_user,
+    verify_profile,
+)
+from redash.authentication.oidc import (
+    _build_server_metadata_url,
+    create_oidc_blueprint,
+    get_name_from_user_info,
+    verify_account,
+)
+from tests import BaseTestCase
+from tests.oidc_provider import OIDCProvider
+
+
+class TestOIDCAuthentication(BaseTestCase):
+    def test_oidc_blueprint_enabled(self):
+        # Ensure OIDC is enabled in settings
+        with patch.object(settings, "OIDC_ENABLED", True):
+            blueprint = create_oidc_blueprint(self.app)
+            self.assertIsNotNone(blueprint)
+
+    def test_oidc_blueprint_disabled(self):
+        with patch.object(settings, "OIDC_ENABLED", False):
+            blueprint = create_oidc_blueprint(self.app)
+            self.assertIsNone(blueprint)
+
+    def test_get_name_from_user_info(self):
+        user_info_samples = [
+            {"name": "John Doe", "given_name": "John", "family_name": "Doe", "preferred_username": "", "nickname": ""},
+            {"name": "", "given_name": "John", "family_name": "Doe", "preferred_username": "", "nickname": ""},
+            {"name": "", "given_name": "", "family_name": "", "preferred_username": "johnd", "nickname": ""},
+            {"name": "", "given_name": "", "family_name": "", "preferred_username": "", "nickname": "Johnny"},
+        ]
+
+        expected_names = ["John Doe", "John Doe", "johnd", "Johnny"]
+
+        for user_info, expected in zip(user_info_samples, expected_names):
+            self.assertEqual(get_name_from_user_info(user_info), expected)
+
+    def test_verify_account(self):
+        mock_org = Mock()
+
+        # Public org should allow any account
+        mock_org.is_public = True
+        self.assertTrue(verify_account(mock_org, "user@example.com"))
+
+        # Non-public, domain allowed
+        mock_org.is_public = False
+        mock_org.oidc_domains = ["example.com"]
+        mock_org.has_user = Mock(return_value=0)
+        self.assertTrue(verify_account(mock_org, "user@example.com"))
+
+        # Non-public, domain not allowed, user exists
+        mock_org.oidc_domains = ["another.com"]
+        mock_org.has_user = Mock(return_value=1)
+        self.assertTrue(verify_account(mock_org, "user@example.com"))
+
+        # Non-public, domain not allowed, user does not exist
+        mock_org.has_user = Mock(return_value=0)
+        self.assertFalse(verify_account(mock_org, "user@example.com"))
+
+    def test_verify_account_domain_is_case_insensitive(self):
+        mock_org = Mock()
+        mock_org.is_public = False
+        mock_org.has_user = Mock(return_value=False)
+
+        mock_org.oidc_domains = ["example.com"]
+        self.assertTrue(verify_account(mock_org, "User@EXAMPLE.COM"))
+
+        mock_org.oidc_domains = ["Example.Com"]
+        self.assertTrue(verify_account(mock_org, "user@example.com"))
+
+    def test_build_server_metadata_url_with_issuer_url(self):
+        self.assertEqual(
+            _build_server_metadata_url("https://accounts.google.com"),
+            "https://accounts.google.com/.well-known/openid-configuration",
+        )
+
+    def test_build_server_metadata_url_with_trailing_slash(self):
+        self.assertEqual(
+            _build_server_metadata_url("https://accounts.google.com/"),
+            "https://accounts.google.com/.well-known/openid-configuration",
+        )
+
+    def test_build_server_metadata_url_with_full_url(self):
+        url = "https://example.com/.well-known/openid-configuration"
+        self.assertEqual(_build_server_metadata_url(url), url)
+
+    def test_build_server_metadata_url_with_realm_path(self):
+        self.assertEqual(
+            _build_server_metadata_url("https://keycloak.example.com/realms/myapp"),
+            "https://keycloak.example.com/realms/myapp/.well-known/openid-configuration",
+        )
+
+
+class TestOIDCRoutes(BaseTestCase):
+    def setUp(self):
+        with patch.object(settings, "OIDC_ENABLED", True):
+            super(TestOIDCRoutes, self).setUp()
+        self.app.secret_key = "test_secret"
+        self.factory.org.settings[models.Organization.SETTING_OIDC_DOMAINS] = ["example.com"]
+        models.db.session.add(self.factory.org)
+        models.db.session.commit()
+
+    def _callback(self, user_info=None, token_error=None, profile=None, profile_error=None, next_url=None):
+        app_cls = "authlib.integrations.flask_client.FlaskOAuth2App"
+        token_kwargs = (
+            {"side_effect": token_error} if token_error else {"return_value": {"id_token": "x", "userinfo": user_info}}
+        )
+        profile_kwargs = {"side_effect": profile_error} if profile_error else {"return_value": profile}
+        with patch(app_cls + ".authorize_access_token", **token_kwargs), patch(
+            app_cls + ".userinfo", **profile_kwargs
+        ), patch(
+            app_cls + ".load_server_metadata", return_value={"userinfo_endpoint": "https://idp.example/userinfo"}
+        ), patch(
+            "redash.authentication.login_user"
+        ) as login_user_mock:
+            with self.app.test_client() as c:
+                if next_url:
+                    with c.session_transaction() as sess:
+                        sess["next_url"] = next_url
+                rv = c.get("/oidc/callback")
+                with c.session_transaction() as sess:
+                    self.callback_session = dict(sess)
+        return rv, login_user_mock
+
+    def test_authorize_without_org_slug_in_session_redirects_to_provider(self):
+        with patch(
+            "authlib.integrations.flask_client.FlaskOAuth2App.authorize_redirect",
+            return_value="redirected",
+        ) as authorize_redirect_mock:
+            with self.app.test_client() as c:
+                rv = c.get("/oidc")
+                self.assertEqual(rv.status_code, 200)
+                self.assertTrue(authorize_redirect_mock.called)
+                with c.session_transaction() as sess:
+                    self.assertIn("next_url", sess)
+
+    def test_callback_logs_in_user_from_allowed_domain(self):
+        rv, login_user_mock = self._callback({"email": "new@example.com", "name": "New User"})
+
+        self.assertEqual(rv.status_code, 302)
+        self.assertTrue(login_user_mock.called)
+        user = models.User.query.filter(models.User.email == "new@example.com").one()
+        self.assertEqual(user.name, "New User")
+
+    def test_callback_token_exchange_failure_redirects_to_login(self):
+        from authlib.integrations.base_client import OAuthError
+
+        rv, login_user_mock = self._callback(token_error=OAuthError(error="invalid_grant"))
+
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_rejects_disallowed_domain(self):
+        rv, login_user_mock = self._callback({"email": "user@other.com", "name": "Other"})
+
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_rejects_unverified_email(self):
+        rv, login_user_mock = self._callback({"email": "user@example.com", "name": "U", "email_verified": False})
+
+        self.assertEqual(rv.status_code, 302)
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_consumes_next_url(self):
+        rv, login_user_mock = self._callback({"email": "user@example.com"}, next_url="/queries/42")
+
+        self.assertEqual(rv.location, "/queries/42")
+        self.assertTrue(login_user_mock.called)
+        self.assertNotIn("next_url", self.callback_session)
+
+    def test_callback_rejects_malformed_email_verified(self):
+        for value in (0, 1, "false", "true", None):
+            with self.subTest(value=value):
+                rv, login_user_mock = self._callback({"email": "user@example.com", "email_verified": value})
+                self.assertIn("/login", rv.location)
+                self.assertFalse(login_user_mock.called)
+
+    def test_callback_accepts_verified_email(self):
+        rv, login_user_mock = self._callback({"email": "user@example.com", "email_verified": True})
+        self.assertEqual(rv.status_code, 302)
+        self.assertTrue(login_user_mock.called)
+
+    def test_callback_fetches_missing_email_from_userinfo(self):
+        rv, login_user_mock = self._callback(
+            {"sub": "subject-1"},
+            profile={"sub": "subject-1", "email": "user@example.com", "name": "User", "email_verified": True},
+        )
+        self.assertEqual(rv.status_code, 302)
+        self.assertTrue(login_user_mock.called)
+
+    def test_callback_rejects_userinfo_from_different_subject(self):
+        rv, login_user_mock = self._callback(
+            {"sub": "subject-1"}, profile={"sub": "subject-2", "email": "user@example.com"}
+        )
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_rejects_missing_validated_id_token(self):
+        rv, login_user_mock = self._callback()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_rejects_userinfo_without_id_token(self):
+        with patch(
+            "authlib.integrations.flask_client.FlaskOAuth2App.authorize_access_token",
+            return_value={"userinfo": {"email": "user@example.com"}},
+        ), patch("redash.authentication.login_user") as login_user_mock:
+            rv = self.client.get("/oidc/callback")
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_rejects_invalid_id_token(self):
+        from joserfc.errors import BadSignatureError
+
+        rv, login_user_mock = self._callback(token_error=BadSignatureError())
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+    def test_callback_handles_userinfo_http_failure(self):
+        rv, login_user_mock = self._callback({"sub": "subject-1"}, profile_error=requests.HTTPError())
+        self.assertIn("/login", rv.location)
+        self.assertFalse(login_user_mock.called)
+
+
+class TestOIDCFlow(BaseTestCase):
+    """Exercise real Authlib discovery, token exchange, JWKS and claim validation."""
+
+    def setUp(self):
+        self.provider = OIDCProvider().start()
+        self.addCleanup(self.provider.stop)
+        transport = patch.dict(os.environ, {"AUTHLIB_INSECURE_TRANSPORT": "1"})
+        transport.start()
+        self.addCleanup(transport.stop)
+        with patch.multiple(
+            settings,
+            OIDC_ENABLED=True,
+            OIDC_CLIENT_ID="local-redash",
+            OIDC_CLIENT_SECRET="local-secret",
+            OIDC_ISSUER_URL=self.provider.issuer,
+        ):
+            super(TestOIDCFlow, self).setUp()
+        self.factory.org.settings[models.Organization.SETTING_OIDC_DOMAINS] = ["example.com"]
+        models.db.session.commit()
+
+    def _login(self, email="verified@example.com"):
+        slug = self.factory.org.slug
+        rv = self.client.get("/{}/oidc?next=/{}/queries".format(slug, slug))
+        rv = self.client.get(rv.location)
+        self.assertEqual(rv.status_code, 302)
+        login = requests.post(
+            rv.location, data={"email": email, "password": "test-only"}, allow_redirects=False, timeout=5
+        )
+        self.assertEqual(login.status_code, 302)
+        parts = urlsplit(login.headers["Location"])
+        self.callback_url = parts.path + "?" + parts.query
+        return self.client.get(self.callback_url)
+
+    def test_login_creates_authenticated_session(self):
+        rv = self._login()
+        self.assertEqual(rv.location, "/{}/queries".format(self.factory.org.slug))
+        with self.client.session_transaction() as sess:
+            self.assertIn("_user_id", sess)
+            self.assertNotIn("next_url", sess)
+            self.assertNotIn("org_slug", sess)
+        user = models.User.get_by_email_and_org("verified@example.com", self.factory.org)
+        rv = self.client.get("/{}/api/users/{}".format(self.factory.org.slug, user.id))
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.json["email"], "verified@example.com")
+
+    def test_login_with_email_only_in_userinfo(self):
+        rv = self._login("userinfo@example.com")
+        self.assertEqual(rv.location, "/{}/queries".format(self.factory.org.slug))
+        self.assertTrue(self.factory.org.has_user("userinfo@example.com"))
+
+    def test_rejects_unverified_email(self):
+        rv = self._login("unverified@example.com")
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("unverified@example.com"))
+
+    def test_rejects_disallowed_domain(self):
+        rv = self._login("outsider@other.com")
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("outsider@other.com"))
+
+    def test_rejects_wrong_nonce(self):
+        self.provider.bad_nonce = True
+        rv = self._login()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("verified@example.com"))
+
+    def test_rejects_bad_signature(self):
+        self.provider.bad_signature = True
+        rv = self._login()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("verified@example.com"))
+
+    def test_rejects_wrong_issuer(self):
+        self.provider.claims_override = {"iss": "https://other-provider.example"}
+        rv = self._login()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("verified@example.com"))
+
+    def test_rejects_wrong_audience(self):
+        self.provider.claims_override = {"aud": "other-client"}
+        rv = self._login()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("verified@example.com"))
+
+    def test_rejects_expired_token(self):
+        self.provider.claims_override = {"exp": int(time.time()) - 600}
+        rv = self._login()
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("verified@example.com"))
+
+    def test_rejects_userinfo_subject_mismatch(self):
+        self.provider.wrong_subject = True
+        rv = self._login("userinfo@example.com")
+        self.assertIn("/login", rv.location)
+        self.assertFalse(self.factory.org.has_user("userinfo@example.com"))
+
+    def test_rejects_replayed_callback(self):
+        self.assertEqual(self._login().status_code, 302)
+        rv = self.client.get(self.callback_url)
+        self.assertIn("/login", rv.location)
+
+
+class TestApiKeyAuthentication(BaseTestCase):
+    #
+    # This is a bad way to write these tests, but the way Flask works doesn't make it easy to write them properly...
+    #
+    def setUp(self):
+        super(TestApiKeyAuthentication, self).setUp()
+        self.api_key = "10"
+        self.query = self.factory.create_query(api_key=self.api_key)
+        models.db.session.flush()
+        self.query_url = "/{}/api/queries/{}".format(self.factory.org.slug, self.query.id)
+        self.queries_url = "/{}/api/queries".format(self.factory.org.slug)
+
+    def test_no_api_key(self):
+        with self.app.test_client() as c:
+            c.get(self.query_url)
+            self.assertIsNone(api_key_load_user_from_request(request))
+
+    def test_wrong_api_key(self):
+        with self.app.test_client() as c:
+            c.get(self.query_url, query_string={"api_key": "whatever"})
+            self.assertIsNone(api_key_load_user_from_request(request))
+
+    def test_correct_api_key(self):
+        with self.app.test_client() as c:
+            c.get(self.query_url, query_string={"api_key": self.api_key})
+            self.assertIsNotNone(api_key_load_user_from_request(request))
+
+    def test_no_query_id(self):
+        with self.app.test_client() as c:
+            c.get(self.queries_url, query_string={"api_key": self.api_key})
+            self.assertIsNone(api_key_load_user_from_request(request))
+
+    def test_user_api_key(self):
+        user = self.factory.create_user(api_key="user_key")
+        models.db.session.flush()
+        with self.app.test_client() as c:
+            c.get(self.queries_url, query_string={"api_key": user.api_key})
+            self.assertEqual(user.id, api_key_load_user_from_request(request).id)
+
+    def test_disabled_user_api_key(self):
+        user = self.factory.create_user(api_key="user_key")
+        user.disable()
+        models.db.session.flush()
+        with self.app.test_client() as c:
+            c.get(self.queries_url, query_string={"api_key": user.api_key})
+            self.assertEqual(None, api_key_load_user_from_request(request))
+
+    def test_api_key_header(self):
+        with self.app.test_client() as c:
+            c.get(self.query_url, headers={"Authorization": "Key {}".format(self.api_key)})
+            self.assertIsNotNone(api_key_load_user_from_request(request))
+
+    def test_api_key_header_with_wrong_key(self):
+        with self.app.test_client() as c:
+            c.get(self.query_url, headers={"Authorization": "Key oops"})
+            self.assertIsNone(api_key_load_user_from_request(request))
+
+    def test_api_key_for_wrong_org(self):
+        other_user = self.factory.create_admin(org=self.factory.create_org())
+
+        with self.app.test_client() as c:
+            rv = c.get(
+                self.query_url,
+                headers={"Authorization": "Key {}".format(other_user.api_key)},
+            )
+            self.assertEqual(404, rv.status_code)
+
+
+class TestHMACAuthentication(BaseTestCase):
+    #
+    # This is a bad way to write these tests, but the way Flask works doesn't make it easy to write them properly...
+    #
+    def setUp(self):
+        super(TestHMACAuthentication, self).setUp()
+        self.api_key = "10"
+        self.query = self.factory.create_query(api_key=self.api_key)
+        models.db.session.flush()
+        self.path = "/{}/api/queries/{}".format(self.query.org.slug, self.query.id)
+        self.expires = time.time() + 1800
+
+    def signature(self, expires):
+        return sign(self.query.api_key, self.path, expires)
+
+    def test_no_signature(self):
+        with self.app.test_client() as c:
+            c.get(self.path)
+            self.assertIsNone(hmac_load_user_from_request(request))
+
+    def test_wrong_signature(self):
+        with self.app.test_client() as c:
+            c.get(
+                self.path,
+                query_string={"signature": "whatever", "expires": self.expires},
+            )
+            self.assertIsNone(hmac_load_user_from_request(request))
+
+    def test_correct_signature(self):
+        with self.app.test_client() as c:
+            c.get(
+                self.path,
+                query_string={
+                    "signature": self.signature(self.expires),
+                    "expires": self.expires,
+                },
+            )
+            self.assertIsNotNone(hmac_load_user_from_request(request))
+
+    def test_no_query_id(self):
+        with self.app.test_client() as c:
+            c.get(
+                "/{}/api/queries".format(self.query.org.slug),
+                query_string={"api_key": self.api_key},
+            )
+            self.assertIsNone(hmac_load_user_from_request(request))
+
+    def test_user_api_key(self):
+        user = self.factory.create_user(api_key="user_key")
+        path = "/api/queries/"
+        models.db.session.flush()
+
+        signature = sign(user.api_key, path, self.expires)
+        with self.app.test_client() as c:
+            c.get(
+                path,
+                query_string={
+                    "signature": signature,
+                    "expires": self.expires,
+                    "user_id": user.id,
+                },
+            )
+            self.assertEqual(user.id, hmac_load_user_from_request(request).id)
+
+
+class TestSessionAuthentication(BaseTestCase):
+    def test_prefers_api_key_over_session_user_id(self):
+        user = self.factory.create_user()
+        query = self.factory.create_query(user=user)
+
+        other_org = self.factory.create_org()
+        other_user = self.factory.create_user(org=other_org)
+        models.db.session.flush()
+
+        rv = self.make_request(
+            "get",
+            "/api/queries/{}?api_key={}".format(query.id, query.api_key),
+            user=other_user,
+        )
+        self.assertEqual(rv.status_code, 200)
+
+
+class TestCreateAndLoginUserOIDC(BaseTestCase):
+    def test_logins_valid_user(self):
+        user = self.factory.create_user(email="test@example.com")
+        with patch("redash.authentication.login_user") as login_user_mock:
+            oidc.create_and_login_user(self.factory.org, user.name, user.email)
+            login_user_mock.assert_called_once_with(user, remember=True)
+
+    def test_creates_valid_new_user(self):
+        email = "test@example.com"
+        name = "Test User"
+
+        with patch("redash.authentication.login_user") as login_user_mock:
+            oidc.create_and_login_user(self.factory.org, name, email)
+
+            self.assertTrue(login_user_mock.called)
+            user = models.User.query.filter(models.User.email == email).one()
+            self.assertEqual(user.email, email)
+
+    def test_updates_user_name(self):
+        user = self.factory.create_user(email="test@example.com")
+
+        with patch("redash.authentication.login_user") as login_user_mock:
+            oidc.create_and_login_user(self.factory.org, "New Name", user.email)
+            login_user_mock.assert_called_once_with(user, remember=True)
+            self.assertEqual(user.name, "New Name")
+
+
+class TestCreateAndLoginUser(BaseTestCase):
+    def test_logins_valid_user(self):
+        user = self.factory.create_user(email="test@example.com")
+
+        with patch("redash.authentication.login_user") as login_user_mock:
+            create_and_login_user(self.factory.org, user.name, user.email)
+            login_user_mock.assert_called_once_with(user, remember=True)
+
+    def test_creates_valid_new_user(self):
+        email = "test@example.com"
+        name = "Test User"
+
+        with patch("redash.authentication.login_user") as login_user_mock:
+            create_and_login_user(self.factory.org, name, email)
+
+            self.assertTrue(login_user_mock.called)
+            user = models.User.query.filter(models.User.email == email).one()
+            self.assertEqual(user.email, email)
+
+    def test_updates_user_name(self):
+        user = self.factory.create_user(email="test@example.com")
+
+        with patch("redash.authentication.login_user") as login_user_mock:
+            create_and_login_user(self.factory.org, "New Name", user.email)
+            login_user_mock.assert_called_once_with(user, remember=True)
+
+
+class TestVerifyProfile(BaseTestCase):
+    def test_no_domain_allowed_for_org(self):
+        profile = dict(email="arik@example.com")
+        self.assertFalse(verify_profile(self.factory.org, profile))
+
+    def test_domain_not_in_org_domains_list(self):
+        profile = dict(email="arik@example.com")
+        self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ["example.org"]
+        self.assertFalse(verify_profile(self.factory.org, profile))
+
+    def test_domain_in_org_domains_list(self):
+        profile = dict(email="arik@example.com")
+        self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ["example.com"]
+        self.assertTrue(verify_profile(self.factory.org, profile))
+
+        self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = [
+            "example.org",
+            "example.com",
+        ]
+        self.assertTrue(verify_profile(self.factory.org, profile))
+
+    def test_org_in_public_mode_accepts_any_domain(self):
+        profile = dict(email="arik@example.com")
+        self.factory.org.settings[models.Organization.SETTING_IS_PUBLIC] = True
+        self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = []
+        self.assertTrue(verify_profile(self.factory.org, profile))
+
+    def test_user_not_in_domain_but_account_exists(self):
+        profile = dict(email="arik@example.com")
+        self.factory.create_user(email="arik@example.com")
+        self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ["example.org"]
+        self.assertTrue(verify_profile(self.factory.org, profile))
+
+
+class TestGetLoginUrl(BaseTestCase):
+    def test_when_multi_org_enabled_and_org_exists(self):
+        with self.app.test_request_context("/{}/".format(self.factory.org.slug)):
+            self.assertEqual(get_login_url(next=None), "/{}/login".format(self.factory.org.slug))
+
+    def test_when_multi_org_enabled_and_org_doesnt_exist(self):
+        with self.app.test_request_context("/{}_notexists/".format(self.factory.org.slug)):
+            self.assertEqual(get_login_url(next=None), "/")
+
+
+class TestRedirectToUrlAfterLoggingIn(BaseTestCase):
+    def setUp(self):
+        super(TestRedirectToUrlAfterLoggingIn, self).setUp()
+        self.user = self.factory.user
+        self.password = "test1234"
+
+    def test_no_next_param(self):
+        response = self.post_request(
+            "/login",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "/{}/".format(self.user.org.slug))
+
+    def test_simple_path_in_next_param(self):
+        response = self.post_request(
+            "/login?next=queries",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "queries")
+
+    def test_starts_scheme_url_in_next_param(self):
+        response = self.post_request(
+            "/login?next=https://redash.io",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_without_scheme_url_in_next_param(self):
+        response = self.post_request(
+            "/login?next=//redash.io",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_without_scheme_with_path_url_in_next_param(self):
+        response = self.post_request(
+            "/login?next=//localhost/queries",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "/queries")
+
+    def test_multiple_slashes_open_redirect(self):
+        response = self.post_request(
+            "/login?next=////evil.com",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_triple_slash_open_redirect(self):
+        response = self.post_request(
+            "/login?next=///evil.com/phish",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_multiple_slashes_with_path(self):
+        response = self.post_request(
+            "/login?next=////evil.com/callback?token=secret",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_file_scheme_open_redirect(self):
+        response = self.post_request(
+            "/login?next=file:https://evil.com/",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_javascript_scheme_rejected(self):
+        response = self.post_request(
+            "/login?next=javascript:alert(1)",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_http_scheme_without_netloc_rejected(self):
+        response = self.post_request(
+            "/login?next=http:///evil.com",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_slash_backslash_redirect_rejected(self):
+        response = self.post_request(
+            "/login?next=/%5Cevil.com",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+    def test_data_scheme_rejected(self):
+        response = self.post_request(
+            "/login?next=data:text/html,<script>alert(1)</script>",
+            data={"email": self.user.email, "password": self.password},
+            org=self.factory.org,
+        )
+        self.assertEqual(response.location, "./")
+
+
+class TestRemoteUserAuth(BaseTestCase):
+    DEFAULT_SETTING_OVERRIDES = {"REDASH_REMOTE_USER_LOGIN_ENABLED": "true"}
+
+    def setUp(self):
+        # Apply default setting overrides to every test
+        self.override_settings(None)
+
+        super(TestRemoteUserAuth, self).setUp()
+
+    def override_settings(self, overrides):
+        """Override settings for testing purposes.
+
+        This helper method can be used to override specific environmental
+        variables to enable / disable Re:Dash features for the duration
+        of the test.
+
+        Note that these overrides only affect code that checks the value of
+        the setting at runtime. It doesn't affect code that only checks the
+        value during program initialization.
+
+        :param dict overrides: a dict of environmental variables to override
+            when the settings are reloaded
+        """
+        variables = self.DEFAULT_SETTING_OVERRIDES.copy()
+        variables.update(overrides or {})
+        with patch.dict(os.environ, variables):
+            importlib.reload(settings)
+
+        # Queue a cleanup routine that reloads the settings without overrides
+        # once the test ends
+        self.addCleanup(lambda: importlib.reload(settings))
+
+    def assert_correct_user_attributes(
+        self,
+        user,
+        email="test@example.com",
+        name="test@example.com",
+        groups=None,
+        org=None,
+    ):
+        """Helper to assert that the user attributes are correct."""
+        groups = groups or []
+        if self.factory.org.default_group.id not in groups:
+            groups.append(self.factory.org.default_group.id)
+
+        self.assertIsNotNone(user)
+        self.assertEqual(user.email, email)
+        self.assertEqual(user.name, name)
+        self.assertEqual(user.org, org or self.factory.org)
+        self.assertCountEqual(user.group_ids, groups)
+
+    def get_test_user(self, email="test@example.com", org=None):
+        """Helper to fetch an user from the database."""
+
+        # Expire all cached objects to ensure these values are read directly
+        # from the database.
+        models.db.session.expire_all()
+
+        return models.User.get_by_email_and_org(email, org or self.factory.org)
+
+    def test_remote_login_disabled(self):
+        self.override_settings({"REDASH_REMOTE_USER_LOGIN_ENABLED": "false"})
+
+        self.get_request(
+            "/remote_user/login",
+            org=self.factory.org,
+            headers={"X-Forwarded-Remote-User": "test@example.com"},
+        )
+
+        with self.assertRaises(NoResultFound):
+            self.get_test_user()
+
+    def test_remote_login_default_header(self):
+        self.get_request(
+            "/remote_user/login",
+            org=self.factory.org,
+            headers={"X-Forwarded-Remote-User": "test@example.com"},
+        )
+
+        self.assert_correct_user_attributes(self.get_test_user())
+
+    def test_remote_login_custom_header(self):
+        self.override_settings({"REDASH_REMOTE_USER_HEADER": "X-Custom-User"})
+
+        self.get_request(
+            "/remote_user/login",
+            org=self.factory.org,
+            headers={"X-Custom-User": "test@example.com"},
+        )
+
+        self.assert_correct_user_attributes(self.get_test_user())
+
+
+class TestUserForgotPassword(BaseTestCase):
+    def test_user_should_receive_password_reset_link(self):
+        user = self.factory.create_user()
+
+        with patch("redash.handlers.authentication.send_password_reset_email") as send_password_reset_email_mock:
+            response = self.post_request("/forgot", org=user.org, data={"email": user.email})
+            self.assertEqual(response.status_code, 200)
+            send_password_reset_email_mock.assert_called_with(user)
+
+    def test_disabled_user_should_not_receive_password_reset_link(self):
+        user = self.factory.create_user()
+        user.disable()
+        self.db.session.add(user)
+        self.db.session.commit()
+
+        with patch(
+            "redash.handlers.authentication.send_password_reset_email"
+        ) as send_password_reset_email_mock, patch(
+            "redash.handlers.authentication.send_user_disabled_email"
+        ) as send_user_disabled_email_mock:
+            response = self.post_request("/forgot", org=user.org, data={"email": user.email})
+            self.assertEqual(response.status_code, 200)
+            send_password_reset_email_mock.assert_not_called()
+            send_user_disabled_email_mock.assert_called_with(user)
+
+
+class TestJWTAuthentication(BaseTestCase):
+    def setUp(self):
+        super(TestJWTAuthentication, self).setUp()
+        self.auth_audience = "My Org"
+        self.auth_issuer = "Admin"
+        self.token_name = "jwt-token"
+        self.rsa_private_key = "/tmp/jwtRS256.key"
+        self.rsa_public_key = "/tmp/jwtRS256.pem"
+
+        if not os.path.exists(self.rsa_public_key):
+            subprocess.check_output(["openssl", "genrsa", "-out", self.rsa_private_key, "4096"])
+            subprocess.check_output(
+                ["openssl", "rsa", "-pubout", "-in", self.rsa_private_key, "-out", self.rsa_public_key]
+            )
+
+        org_settings["auth_jwt_login_enabled"] = True
+        org_settings["auth_jwt_auth_public_certs_url"] = "file://{}".format(self.rsa_public_key)
+        org_settings["auth_jwt_auth_issuer"] = self.auth_issuer
+        org_settings["auth_jwt_auth_audience"] = self.auth_audience
+        org_settings["auth_jwt_auth_header_name"] = self.token_name
+
+    def tearDown(self):
+        org_settings["auth_jwt_login_enabled"] = False
+        org_settings["auth_jwt_auth_public_certs_url"] = ""
+        org_settings["auth_jwt_auth_issuer"] = ""
+        org_settings["auth_jwt_auth_audience"] = ""
+        org_settings["auth_jwt_auth_header_name"] = ""
+        super().tearDown()
+
+    def test_jwt_no_token(self):
+        response = self.get_request("/data_sources", org=self.factory.org)
+        self.assertEqual(response.status_code, 302)
+
+    def test_jwt_from_pem_file(self):
+        user = self.factory.create_user()
+
+        issued_at_timestamp = time.time()
+        expiration_timestamp = issued_at_timestamp + 60
+
+        data = {
+            "aud": self.auth_audience,
+            "email": user.email,
+            "exp": expiration_timestamp,
+            "iat": issued_at_timestamp,
+            "iss": self.auth_issuer,
+        }
+        with open(self.rsa_private_key) as keyfile:
+            sign_key = keyfile.read().strip()
+        token_data = jwt.encode(data, sign_key, algorithm="RS256")
+
+        response = self.get_request("/data_sources", org=self.factory.org, headers={self.token_name: token_data})
+        self.assertEqual(response.status_code, 200)
+
+    @patch.object(requests, "get")
+    def test_jwk_decode(self, mock_get):
+        with open(self.rsa_public_key, "rb") as keyfile:
+            public_key = jwcrypto.jwk.JWK.from_pem(keyfile.read())
+            jwk_keys = {"keys": [json.loads(public_key.export())]}
+
+        mockresponse = Mock()
+        mockresponse.json = lambda: jwk_keys
+        mock_get.return_value = mockresponse
+
+        keys = jwt_auth.get_public_keys("http://localhost/key.jwt")
+        self.assertEqual(keys[0].key_size, 4096)

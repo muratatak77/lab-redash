@@ -1,0 +1,11 @@
+packages:
+  - "viz-lib"
+
+onlyBuiltDependencies:
+  - "sql-formatter"
+  - "core-js"
+  - "core-js-pure"
+  - "es5-ext"
+  - "less"
+  - "puppeteer"
+  - "unrs-resolver"
