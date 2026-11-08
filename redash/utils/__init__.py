@@ -240,3 +240,5 @@ def render_template(path, context):
     function decorated with the `context_processor` decorator, which is not explicitly required for rendering purposes.
     """
     return current_app.jinja_env.get_template(path).render(**context)
+
+# Lab note.
