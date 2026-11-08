@@ -276,7 +276,7 @@ test.describe("Alert notifications", () => {
     );
     await alertMenu(page, "Evaluate");
     expect((await evaluated).status()).toBe(200);
-    await expect(toast(page)).toContainText("Alert evaluated. Refresh page for updated status."); // changed on the base while this PR was open (1794138991)
+    await expect(toast(page)).toContainText("Alert evaluated. Refresh page for updated status."); // changed on the base while this PR was open (1794146064)
 
     // That notification is the only one: nothing was sent for the two state changes while muted
     await webhooks.waitFor(rig.hookPath, 1);
