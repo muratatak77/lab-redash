@@ -134,15 +134,20 @@ To resume notifications again, click the vertical ellipsis menu and choose _Unmu
 ## State History
 
 The alert page lists every time the alert changed status, and every repeated
-notification sent while it stays `TRIGGERED`, most recent first. Each entry shows
+notification sent on schedule while it stays `TRIGGERED`, most recent first. Each entry shows
 the previous and the new status, the value of the _Value Column_ at that moment,
 whether a notification was sent, and whether the change came from a query
 execution or from choosing _Evaluate_ in the vertical ellipsis (`⋮`) menu.
 
 Notifications are not sent for changes made while the alert is muted, nor for
-the first evaluation of a new alert when its status is `OK`. If the alert is set
-to notify again while it stays `TRIGGERED`, each of those notifications is listed
-as well.
+the first evaluation of a new alert when its status is `OK`, nor when the alert
+has no destinations. If the alert is set to notify again while it stays
+`TRIGGERED`, each of those notifications is listed as well.
+
+Choosing _Evaluate_ always notifies the alert's destinations, even when the alert
+is muted or its status did not change. The history lists a manual evaluation only
+when it changed the status or fell due for a repeated notification; other manual
+evaluations notify without adding an entry.
 
 Redash keeps the 100 most recent entries of each alert. Administrators can change
 this with the `REDASH_ALERT_STATE_HISTORY_LIMIT` environment variable.

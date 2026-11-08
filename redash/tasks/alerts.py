@@ -52,7 +52,7 @@ def check_alerts_for_query(query_id, metadata):
             alert.record_state_change(
                 old_state,
                 new_state,
-                notified=skip_reason is None,
+                notified=skip_reason is None and bool(alert.subscriptions),
                 trigger=models.AlertStateChange.SCHEDULED_TRIGGER,
                 value=value,
             )

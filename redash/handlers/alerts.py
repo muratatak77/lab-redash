@@ -67,7 +67,7 @@ class AlertEvaluateResource(BaseResource):
             alert.record_state_change(
                 alert.state,
                 new_state,
-                notified=True,
+                notified=bool(alert.subscriptions),
                 trigger=models.AlertStateChange.MANUAL_TRIGGER,
                 value=value,
             )

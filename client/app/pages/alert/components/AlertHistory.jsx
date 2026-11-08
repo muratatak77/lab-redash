@@ -30,7 +30,7 @@ function NotificationStatus({ change }) {
     );
   }
   return (
-    <Tooltip title="Notifications are skipped while an alert is muted, or when it is evaluated as OK for the first time.">
+    <Tooltip title="Notifications are skipped while an alert is muted, when it is evaluated as OK for the first time, or when it has no destinations.">
       <span className="text-muted">
         <i className="fa fa-bell-slash-o m-r-5" aria-hidden="true" />
         Not sent

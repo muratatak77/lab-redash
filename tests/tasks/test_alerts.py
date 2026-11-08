@@ -47,6 +47,7 @@ class TestCheckAlertsForQueryHistory(BaseTestCase):
 
     def test_records_state_change_when_notifying(self, notify_subscriptions):
         alert = self.factory.create_alert(state=Alert.OK_STATE)
+        self.factory.create_alert_subscription(alert=alert)
 
         (change,) = self.check(alert, Alert.TRIGGERED_STATE)
 
@@ -55,6 +56,14 @@ class TestCheckAlertsForQueryHistory(BaseTestCase):
         self.assertTrue(change.notified)
         self.assertEqual(change.trigger, AlertStateChange.SCHEDULED_TRIGGER)
         notify_subscriptions.assert_called_once()
+
+    def test_records_state_change_without_subscriptions_as_not_notified(self, notify_subscriptions):
+        alert = self.factory.create_alert(state=Alert.OK_STATE)
+
+        (change,) = self.check(alert, Alert.TRIGGERED_STATE)
+
+        self.assertEqual(change.new_state, Alert.TRIGGERED_STATE)
+        self.assertFalse(change.notified)
 
     def test_computes_alert_value_once(self, notify_subscriptions):
         alert = self.factory.create_alert(state=Alert.OK_STATE)
@@ -93,6 +102,7 @@ class TestCheckAlertsForQueryHistory(BaseTestCase):
             rearm=60,
             last_triggered_at=utcnow() - datetime.timedelta(minutes=5),
         )
+        self.factory.create_alert_subscription(alert=alert)
 
         (change,) = self.check(alert, Alert.TRIGGERED_STATE)
 

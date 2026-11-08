@@ -151,6 +151,7 @@ class TestAlertEvaluateResource(BaseTestCase):
     @patch.object(Alert, "evaluate", return_value=Alert.TRIGGERED_STATE)
     def test_records_manual_state_change(self, mock_evaluate, mock_notify_subscriptions):
         alert = self.factory.create_alert(state=Alert.OK_STATE)
+        self.factory.create_alert_subscription(alert=alert)
 
         rv = self.make_request("post", "/api/alerts/{}/eval".format(alert.id))
 
@@ -160,6 +161,20 @@ class TestAlertEvaluateResource(BaseTestCase):
         self.assertEqual(change.new_state, Alert.TRIGGERED_STATE)
         self.assertEqual(change.trigger, AlertStateChange.MANUAL_TRIGGER)
         self.assertTrue(change.notified)
+
+    @patch("redash.handlers.alerts.notify_subscriptions")
+    @patch.object(Alert, "evaluate", return_value=Alert.TRIGGERED_STATE)
+    def test_records_manual_state_change_without_subscriptions_as_not_notified(
+        self, mock_evaluate, mock_notify_subscriptions
+    ):
+        alert = self.factory.create_alert(state=Alert.OK_STATE)
+
+        rv = self.make_request("post", "/api/alerts/{}/eval".format(alert.id))
+
+        self.assertEqual(rv.status_code, 200)
+        (change,) = AlertStateChange.for_alert(alert.id)
+        self.assertEqual(change.trigger, AlertStateChange.MANUAL_TRIGGER)
+        self.assertFalse(change.notified)
 
     @patch("redash.handlers.alerts.notify_subscriptions")
     @patch.object(Alert, "evaluate", return_value=Alert.OK_STATE)

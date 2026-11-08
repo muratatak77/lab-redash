@@ -183,16 +183,21 @@ class Alert extends React.Component {
   evaluate = () => {
     const { alert } = this.state;
     return AlertService.evaluate(alert)
-      .then(() => AlertService.get(alert))
-      .then(({ state, last_triggered_at }) => {
-        if (this._isMounted) {
-          this.setState(({ alert, historyVersion }) => ({
-            alert: Object.assign(alert, { state, last_triggered_at }),
-            historyVersion: historyVersion + 1,
-          }));
-        }
-        notification.success("Alert evaluated.");
-      })
+      .then(() =>
+        AlertService.get(alert)
+          .then(({ state, last_triggered_at }) => {
+            if (this._isMounted) {
+              this.setState(({ alert, historyVersion }) => ({
+                alert: Object.assign(alert, { state, last_triggered_at }),
+                historyVersion: historyVersion + 1,
+              }));
+            }
+            notification.success("Alert evaluated.");
+          })
+          .catch(() => {
+            notification.success("Alert evaluated. Refresh page for updated status.");
+          })
+      )
       .catch(() => {
         notifications.error("Failed to evaluate alert.");
       });

@@ -1047,6 +1047,10 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
         return next_state(op, value, self.options["value"])
 
     def record_state_change(self, previous_state, new_state, notified, trigger, value=_UNSET):
+        """Adds an `AlertStateChange` for this alert, prunes old ones, and returns the new row.
+
+        Pass the result of `current_value()` as `value` to reuse it; otherwise it is computed here.
+        """
         if value is _UNSET:
             value = self.current_value()
         change = AlertStateChange(
@@ -1135,11 +1139,12 @@ class AlertStateChange(db.Model):
 
     @classmethod
     def for_alert(cls, alert_id):
+        """Returns a query over the alert's state changes, most recent first."""
         return cls.query.filter(cls.alert_id == alert_id).order_by(cls.created_at.desc(), cls.id.desc())
 
     @classmethod
     def prune(cls, alert_id, keep):
-        """Removes all but the `keep` most recent state changes of an alert."""
+        """Removes all but the `keep` most recent state changes of an alert and returns how many were deleted."""
         if keep <= 0:
             return 0
 
@@ -1149,6 +1154,7 @@ class AlertStateChange(db.Model):
         )
 
     def to_dict(self):
+        """Returns the state change as a JSON-serializable dict."""
         return {
             "id": self.id,
             "alert_id": self.alert_id,
