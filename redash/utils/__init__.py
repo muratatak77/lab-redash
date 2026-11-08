@@ -241,4 +241,5 @@ def render_template(path, context):
     """
     return current_app.jinja_env.get_template(path).render(**context)
 
+
 # Lab note.
