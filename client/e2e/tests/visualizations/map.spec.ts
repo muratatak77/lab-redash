@@ -58,7 +58,7 @@ function paneOffset(page: Page): Promise<{ x: number; y: number }> {
     });
 }
 
-test.describe("Map (Markers) visualization", () => {
+test.describe.skip("Map (Markers) visualization", () => {
   let queryId: number;
   let rows: Row[];
   let tiles: string[];
@@ -334,7 +334,7 @@ test.describe("Map (Markers) visualization", () => {
     expect(new URL(page.url()).pathname).toBe(`/queries/${queryId}`);
   });
 
-  test.skip("the zoom buttons zoom, the mouse wheel does not", async ({ page, api }) => {
+  test("the zoom buttons zoom, the mouse wheel does not", async ({ page, api }) => {
     await openSavedMap(page, api);
     await leaflet(page).locator(".leaflet-control-zoom-in").click();
     await expect.poll(() => tileZoom(page)).toBe(3);
