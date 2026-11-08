@@ -58,7 +58,7 @@ class TestBuildUrl(TestCase):
             build_url(DummyRequest("example.com:443", "https"), "example.com", "/test"),
         )
         self.assertEqual(
-            "http://example.com:80/test",
+            "http://example.com/test",
             build_url(DummyRequest("example.com:80", "http"), "example.com", "/test"),
         )
         self.assertEqual(
