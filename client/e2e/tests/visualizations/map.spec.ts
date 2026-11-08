@@ -58,7 +58,8 @@ function paneOffset(page: Page): Promise<{ x: number; y: number }> {
     });
 }
 
-test.describe.skip("Map (Markers) visualization", () => {
+test.describe("Map (Markers) visualization", () => {
+  test.skip();
   let queryId: number;
   let rows: Row[];
   let tiles: string[];
