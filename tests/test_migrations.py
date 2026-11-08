@@ -137,3 +137,22 @@ class TestDataMigrations(BaseTestCase):
 
         options = self.scalar(f"SELECT options FROM widgets WHERE id = {widget.id}")
         self.assertEqual({"row": 0, "col": 0, "sizeX": 3}, json.loads(options)["position"])
+
+    def test_alert_state_changes_table(self):
+        alert = self.factory.create_alert()
+
+        self.run_migration("20a089f6d0ee", prepare=["DROP TABLE alert_state_changes"])
+        with db.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO alert_state_changes "
+                    "(alert_id, previous_state, new_state, notified, trigger, created_at) "
+                    f"VALUES ({alert.id}, 'ok', 'triggered', true, 'scheduled', now())"
+                )
+            )
+            connection.execute(text(f"DELETE FROM alerts WHERE id = {alert.id}"))
+
+        self.assertEqual(0, self.scalar("SELECT count(*) FROM alert_state_changes"))
+
+        run_migration("20a089f6d0ee", direction="downgrade")
+        self.assertIsNone(self.scalar("SELECT to_regclass('alert_state_changes')"))

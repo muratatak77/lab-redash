@@ -276,7 +276,19 @@ test.describe("Alert notifications", () => {
     );
     await alertMenu(page, "Evaluate");
     expect((await evaluated).status()).toBe(200);
-    await expect(toast(page)).toContainText("Alert evaluated. Refresh page for updated status.");
+    await expect(toast(page)).toContainText("Alert evaluated.");
+
+    // The history has every state change, most recent first; none of them notified anyone. Evaluating
+    // didn't change the state, so it added nothing.
+    const history = page.locator(".alert-history tbody tr.ant-table-row");
+    await expect(history).toHaveCount(3);
+    await expect(history.locator(".label")).toHaveText(["TRIGGERED", "OK", "OK", "TRIGGERED", "UNKNOWN", "OK"]);
+    await expect(history.nth(0)).toContainText("5");
+    await expect(history.nth(1)).toContainText("50");
+    for (const row of await history.all()) {
+      await expect(row).toContainText("Not sent");
+      await expect(row).toContainText("On schedule");
+    }
 
     // That notification is the only one: nothing was sent for the two state changes while muted
     await webhooks.waitFor(rig.hookPath, 1);

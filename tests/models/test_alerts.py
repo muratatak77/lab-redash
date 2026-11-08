@@ -1,8 +1,10 @@
 import textwrap
 from unittest import TestCase
 
+from mock import patch
+
 from redash import settings
-from redash.models import OPERATORS, Alert, db, next_state
+from redash.models import OPERATORS, Alert, AlertStateChange, db, next_state
 from tests import BaseTestCase
 
 
@@ -216,3 +218,113 @@ class TestAlertRenderTemplate(BaseTestCase):
         """
         result = alert.render_template(textwrap.dedent(custom_alert))
         self.assertMultiLineEqual(result, textwrap.dedent(expected))
+
+
+class TestAlertCurrentValue(BaseTestCase):
+    def create_alert(self, results, selector="first"):
+        result = self.factory.create_query_result(data=results)
+        query = self.factory.create_query(latest_query_data_id=result.id)
+        return self.factory.create_alert(
+            query_rel=query, options={"selector": selector, "op": ">", "column": "foo", "value": "1"}
+        )
+
+    def test_returns_first_row_value(self):
+        alert = self.create_alert({"rows": [{"foo": 3}, {"foo": 7}], "columns": [{"name": "foo", "type": "INTEGER"}]})
+        self.assertEqual(alert.current_value(), 3)
+
+    def test_returns_aggregated_value_for_min_and_max_selectors(self):
+        results = {"rows": [{"foo": "3"}, {"foo": 7}, {"foo": 1}], "columns": [{"name": "foo", "type": "INTEGER"}]}
+        self.assertEqual(self.create_alert(results, selector="max").current_value(), 7.0)
+        self.assertEqual(self.create_alert(results, selector="min").current_value(), 1.0)
+
+    def test_returns_none_when_value_is_not_numeric(self):
+        results = {"rows": [{"foo": "abc"}], "columns": [{"name": "foo", "type": "STRING"}]}
+        self.assertIsNone(self.create_alert(results, selector="max").current_value())
+
+    def test_returns_none_without_results(self):
+        query = self.factory.create_query(latest_query_data_id=None)
+        alert = self.factory.create_alert(query_rel=query, options={"column": "foo", "op": ">", "value": "1"})
+        self.assertIsNone(alert.current_value())
+
+
+class TestAlertStateChanges(BaseTestCase):
+    def create_alert(self, value=5):
+        result = self.factory.create_query_result(data=get_results(value))
+        query = self.factory.create_query(latest_query_data_id=result.id)
+        return self.factory.create_alert(
+            query_rel=query, options={"selector": "first", "op": ">", "column": "foo", "value": "1"}
+        )
+
+    def test_record_state_change_stores_evaluated_value(self):
+        alert = self.create_alert(value=5)
+
+        change = alert.record_state_change(
+            Alert.UNKNOWN_STATE, Alert.TRIGGERED_STATE, notified=True, trigger=AlertStateChange.SCHEDULED_TRIGGER
+        )
+        db.session.commit()
+
+        self.assertEqual(
+            change.to_dict(),
+            {
+                "id": change.id,
+                "alert_id": alert.id,
+                "previous_state": Alert.UNKNOWN_STATE,
+                "new_state": Alert.TRIGGERED_STATE,
+                "value": "5",
+                "notified": True,
+                "trigger": AlertStateChange.SCHEDULED_TRIGGER,
+                "created_at": change.created_at,
+            },
+        )
+        self.assertIsNotNone(change.created_at)
+
+    def test_record_state_change_without_query_results(self):
+        query = self.factory.create_query(latest_query_data_id=None)
+        alert = self.factory.create_alert(query_rel=query, options={"column": "foo", "op": ">", "value": "1"})
+
+        change = alert.record_state_change(
+            Alert.TRIGGERED_STATE, Alert.UNKNOWN_STATE, notified=False, trigger=AlertStateChange.MANUAL_TRIGGER
+        )
+
+        self.assertIsNone(change.value)
+
+    def test_for_alert_returns_most_recent_first(self):
+        alert = self.create_alert()
+        other_alert = self.create_alert()
+        first = self.factory.create_alert_state_change(alert=alert)
+        second = self.factory.create_alert_state_change(alert=alert)
+        self.factory.create_alert_state_change(alert=other_alert)
+
+        self.assertEqual([second.id, first.id], [c.id for c in AlertStateChange.for_alert(alert.id)])
+
+    def test_record_state_change_prunes_old_entries(self):
+        alert = self.create_alert()
+        other_change = self.factory.create_alert_state_change()
+
+        with patch.object(settings, "ALERT_STATE_HISTORY_LIMIT", 3):
+            for _ in range(5):
+                alert.record_state_change(
+                    Alert.OK_STATE, Alert.TRIGGERED_STATE, notified=True, trigger=AlertStateChange.SCHEDULED_TRIGGER
+                )
+                db.session.commit()
+
+        self.assertEqual(3, AlertStateChange.for_alert(alert.id).count())
+        self.assertIsNotNone(AlertStateChange.query.get(other_change.id))
+
+    def test_prune_is_disabled_with_zero_limit(self):
+        alert = self.create_alert()
+        for _ in range(3):
+            self.factory.create_alert_state_change(alert=alert)
+
+        self.assertEqual(0, AlertStateChange.prune(alert.id, 0))
+        self.assertEqual(3, AlertStateChange.for_alert(alert.id).count())
+
+    def test_deleting_alert_removes_its_history(self):
+        change = self.factory.create_alert_state_change()
+        change_id = change.id
+
+        db.session.delete(change.alert)
+        db.session.commit()
+        db.session.expunge_all()
+
+        self.assertIsNone(AlertStateChange.query.get(change_id))

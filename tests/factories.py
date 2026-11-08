@@ -164,6 +164,15 @@ alert_subscription_factory = ModelFactory(
     alert=alert_factory.create,
 )
 
+alert_state_change_factory = ModelFactory(
+    redash.models.AlertStateChange,
+    alert=alert_factory.create,
+    previous_state=redash.models.Alert.UNKNOWN_STATE,
+    new_state=redash.models.Alert.TRIGGERED_STATE,
+    notified=True,
+    trigger=redash.models.AlertStateChange.SCHEDULED_TRIGGER,
+)
+
 query_snippet_factory = ModelFactory(
     redash.models.QuerySnippet,
     trigger=Sequence("trigger {}"),
@@ -251,6 +260,12 @@ class Factory:
 
         args.update(**kwargs)
         return alert_subscription_factory.create(**args)
+
+    def create_alert_state_change(self, **kwargs):
+        args = {"alert": self.create_alert()}
+
+        args.update(**kwargs)
+        return alert_state_change_factory.create(**args)
 
     def create_data_source(self, **kwargs):
         group = None

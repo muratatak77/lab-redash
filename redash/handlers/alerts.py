@@ -5,6 +5,7 @@ from redash import models, utils
 from redash.handlers.base import (
     BaseResource,
     get_object_or_404,
+    paginate,
     require_fields,
 )
 from redash.permissions import (
@@ -62,6 +63,12 @@ class AlertEvaluateResource(BaseResource):
 
         new_state = alert.evaluate()
         if should_notify(alert, new_state):
+            alert.record_state_change(
+                alert.state,
+                new_state,
+                notified=True,
+                trigger=models.AlertStateChange.MANUAL_TRIGGER,
+            )
             alert.state = new_state
             alert.last_triggered_at = utils.utcnow()
             models.db.session.commit()
@@ -88,6 +95,30 @@ class AlertMuteResource(BaseResource):
         models.db.session.commit()
 
         self.record_event({"action": "unmute", "object_id": alert.id, "object_type": "alert"})
+
+
+class AlertStateHistoryResource(BaseResource):
+    def get(self, alert_id):
+        """
+        Lists the state changes of an alert, most recent first.
+
+        :qparam number page: Page number to retrieve.
+        :qparam number page_size: Number of state changes to return per page.
+        """
+        alert = get_object_or_404(models.Alert.get_by_id_and_org, alert_id, self.current_org)
+        require_access(alert, self.current_user, view_only)
+
+        page = request.args.get("page", 1, type=int)
+        page_size = request.args.get("page_size", 25, type=int)
+
+        self.record_event({"action": "view_history", "object_id": alert.id, "object_type": "alert"})
+
+        return paginate(
+            models.AlertStateChange.for_alert(alert.id),
+            page,
+            page_size,
+            lambda change: change.to_dict(),
+        )
 
 
 class AlertListResource(BaseResource):

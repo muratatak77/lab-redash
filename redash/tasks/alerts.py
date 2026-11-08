@@ -41,14 +41,23 @@ def check_alerts_for_query(query_id, metadata):
 
             alert.state = new_state
             alert.last_triggered_at = utils.utcnow()
+
+            skip_reason = None
+            if old_state == models.Alert.UNKNOWN_STATE and new_state == models.Alert.OK_STATE:
+                skip_reason = "previous state was unknown and now it's ok"
+            elif alert.muted:
+                skip_reason = "alert muted"
+
+            alert.record_state_change(
+                old_state,
+                new_state,
+                notified=skip_reason is None,
+                trigger=models.AlertStateChange.SCHEDULED_TRIGGER,
+            )
             models.db.session.commit()
 
-            if old_state == models.Alert.UNKNOWN_STATE and new_state == models.Alert.OK_STATE:
-                logger.debug("Skipping notification (previous state was unknown and now it's ok).")
-                continue
-
-            if alert.muted:
-                logger.debug("Skipping notification (alert muted).")
+            if skip_reason:
+                logger.debug("Skipping notification (%s).", skip_reason)
                 continue
 
             notify_subscriptions(alert, new_state, metadata)

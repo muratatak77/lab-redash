@@ -54,6 +54,7 @@ class Alert extends React.Component {
     pendingRearm: null,
     canEdit: false,
     mode: null,
+    historyVersion: 0,
   };
 
   componentDidMount() {
@@ -182,8 +183,15 @@ class Alert extends React.Component {
   evaluate = () => {
     const { alert } = this.state;
     return AlertService.evaluate(alert)
-      .then(() => {
-        notification.success("Alert evaluated. Refresh page for updated status.");
+      .then(() => AlertService.get(alert))
+      .then(({ state, last_triggered_at }) => {
+        if (this._isMounted) {
+          this.setState(({ alert, historyVersion }) => ({
+            alert: Object.assign(alert, { state, last_triggered_at }),
+            historyVersion: historyVersion + 1,
+          }));
+        }
+        notification.success("Alert evaluated.");
       })
       .catch(() => {
         notifications.error("Failed to evaluate alert.");
@@ -233,7 +241,7 @@ class Alert extends React.Component {
     }
 
     const muted = !!alert.options.muted;
-    const { queryResult, mode, canEdit, pendingRearm } = this.state;
+    const { queryResult, mode, canEdit, pendingRearm, historyVersion } = this.state;
 
     const menuButton = (
       <MenuButton
@@ -264,7 +272,14 @@ class Alert extends React.Component {
         <div className="container">
           {mode === MODES.NEW && <AlertNew {...commonProps} />}
           {mode === MODES.VIEW && (
-            <AlertView canEdit={canEdit} onEdit={this.edit} muted={muted} unmute={this.unmute} {...commonProps} />
+            <AlertView
+              canEdit={canEdit}
+              onEdit={this.edit}
+              muted={muted}
+              unmute={this.unmute}
+              historyVersion={historyVersion}
+              {...commonProps}
+            />
           )}
           {mode === MODES.EDIT && <AlertEdit cancel={this.cancel} {...commonProps} />}
         </div>

@@ -2,7 +2,7 @@ import datetime
 
 from mock import patch
 
-from redash.models import Alert, AlertSubscription, db
+from redash.models import Alert, AlertStateChange, AlertSubscription, db
 from redash.utils import utcnow
 from tests import BaseTestCase
 
@@ -147,6 +147,108 @@ class TestAlertEvaluateResource(BaseTestCase):
         self.assertEqual(rv.status_code, 200)
         mock_notify_subscriptions.assert_called_once()
 
+    @patch("redash.handlers.alerts.notify_subscriptions")
+    @patch.object(Alert, "evaluate", return_value=Alert.TRIGGERED_STATE)
+    def test_records_manual_state_change(self, mock_evaluate, mock_notify_subscriptions):
+        alert = self.factory.create_alert(state=Alert.OK_STATE)
+
+        rv = self.make_request("post", "/api/alerts/{}/eval".format(alert.id))
+
+        self.assertEqual(rv.status_code, 200)
+        (change,) = AlertStateChange.for_alert(alert.id)
+        self.assertEqual(change.previous_state, Alert.OK_STATE)
+        self.assertEqual(change.new_state, Alert.TRIGGERED_STATE)
+        self.assertEqual(change.trigger, AlertStateChange.MANUAL_TRIGGER)
+        self.assertTrue(change.notified)
+
+    @patch("redash.handlers.alerts.notify_subscriptions")
+    @patch.object(Alert, "evaluate", return_value=Alert.OK_STATE)
+    def test_doesnt_record_state_change_when_state_is_unchanged(self, mock_evaluate, mock_notify_subscriptions):
+        alert = self.factory.create_alert(state=Alert.OK_STATE)
+
+        rv = self.make_request("post", "/api/alerts/{}/eval".format(alert.id))
+
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(0, AlertStateChange.for_alert(alert.id).count())
+
+
+class TestAlertStateHistoryResourceGet(BaseTestCase):
+    def test_returns_paginated_history_most_recent_first(self):
+        alert = self.factory.create_alert()
+        changes = [
+            self.factory.create_alert_state_change(
+                alert=alert, previous_state=previous_state, new_state=new_state, value=value
+            )
+            for previous_state, new_state, value in [
+                (Alert.UNKNOWN_STATE, Alert.TRIGGERED_STATE, "12"),
+                (Alert.TRIGGERED_STATE, Alert.OK_STATE, "3"),
+                (Alert.OK_STATE, Alert.TRIGGERED_STATE, "15"),
+            ]
+        ]
+        self.factory.create_alert_state_change()
+
+        rv = self.make_request("get", "/api/alerts/{}/history?page_size=2".format(alert.id))
+
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.json["count"], 3)
+        self.assertEqual(rv.json["page"], 1)
+        self.assertEqual([c["id"] for c in rv.json["results"]], [changes[2].id, changes[1].id])
+        self.assertEqual(rv.json["results"][0]["value"], "15")
+        self.assertEqual(rv.json["results"][0]["previous_state"], Alert.OK_STATE)
+        self.assertEqual(rv.json["results"][0]["new_state"], Alert.TRIGGERED_STATE)
+
+        rv = self.make_request("get", "/api/alerts/{}/history?page=2&page_size=2".format(alert.id))
+        self.assertEqual([c["id"] for c in rv.json["results"]], [changes[0].id])
+
+    def test_returns_empty_history(self):
+        alert = self.factory.create_alert()
+
+        rv = self.make_request("get", "/api/alerts/{}/history".format(alert.id))
+
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.json["count"], 0)
+        self.assertEqual(rv.json["results"], [])
+
+    def test_viewers_can_read_history(self):
+        alert = self.factory.create_alert()
+        self.factory.create_alert_state_change(alert=alert)
+
+        rv = self.make_request("get", "/api/alerts/{}/history".format(alert.id), user=self.factory.create_user())
+
+        self.assertEqual(rv.status_code, 200)
+        self.assertEqual(rv.json["count"], 1)
+
+    def test_returns_403_if_not_allowed(self):
+        data_source = self.factory.create_data_source(group=self.factory.create_group())
+        query = self.factory.create_query(data_source=data_source)
+        alert = self.factory.create_alert(query_rel=query)
+        db.session.commit()
+
+        rv = self.make_request("get", "/api/alerts/{}/history".format(alert.id))
+
+        self.assertEqual(rv.status_code, 403)
+
+    def test_returns_404_if_admin_from_another_org(self):
+        second_org = self.factory.create_org()
+        second_org_admin = self.factory.create_admin(org=second_org)
+        alert = self.factory.create_alert()
+
+        rv = self.make_request(
+            "get",
+            "/api/alerts/{}/history".format(alert.id),
+            org=second_org,
+            user=second_org_admin,
+        )
+
+        self.assertEqual(rv.status_code, 404)
+
+    def test_rejects_invalid_page_size(self):
+        alert = self.factory.create_alert()
+
+        rv = self.make_request("get", "/api/alerts/{}/history?page_size=500".format(alert.id))
+
+        self.assertEqual(rv.status_code, 400)
+
 
 class TestAlertResourceDelete(BaseTestCase):
     def test_removes_alert_and_subscriptions(self):
@@ -158,6 +260,16 @@ class TestAlertResourceDelete(BaseTestCase):
 
         self.assertEqual(Alert.query.get(subscription.alert.id), None)
         self.assertEqual(AlertSubscription.query.get(subscription.id), None)
+
+    def test_removes_alert_history(self):
+        change = self.factory.create_alert_state_change()
+        change_id = change.id
+
+        rv = self.make_request("delete", "/api/alerts/{}".format(change.alert_id))
+
+        self.assertEqual(rv.status_code, 200)
+        db.session.expunge_all()
+        self.assertIsNone(AlertStateChange.query.get(change_id))
 
     def test_returns_403_if_not_allowed(self):
         alert = self.factory.create_alert()
