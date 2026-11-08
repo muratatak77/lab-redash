@@ -400,13 +400,24 @@ export async function stubMapTiles(page: Page): Promise<string[]> {
 
 export const leaflet = (scope: Page | Locator) => scope.locator(".leaflet-container").first();
 
-/** The zoom level of a tile map, read from the URLs of the tiles it shows. */
+/**
+ * The zoom level of a tile map, read from the URLs of the tiles of its current level.
+ *
+ * Leaflet keeps the tiles of the previous zoom level in their own container behind the current one until it prunes
+ * them, and on a loaded machine that prune can be skipped until the next move (its 250ms timer fires before the new
+ * tiles have faded in, and the fade loop then ends without pruning). The current level is the container Leaflet puts
+ * in front (`z-index` = maxZoom), so only its tiles count.
+ */
 export function tileZoom(scope: Page | Locator): Promise<number | null> {
   return leaflet(scope).evaluate((container) => {
+    const levels = Array.from(container.querySelectorAll<HTMLElement>(".leaflet-tile-container"));
+    const zIndex = (level: HTMLElement) => Number(level.style.zIndex) || 0;
+    const front = Math.max(...levels.map(zIndex));
     const zooms = new Set(
-      Array.from(container.querySelectorAll<HTMLImageElement>("img.leaflet-tile")).map(
-        (tile) => (tile.src.match(/\/(\d+)\/\d+\/\d+(\.\w+)?$/) || [])[1]
-      )
+      levels
+        .filter((level) => zIndex(level) === front)
+        .flatMap((level) => Array.from(level.querySelectorAll<HTMLImageElement>("img.leaflet-tile")))
+        .map((tile) => (tile.src.match(/\/(\d+)\/\d+\/\d+(\.\w+)?$/) || [])[1])
     );
     return zooms.size === 1 ? Number([...zooms][0]) : null;
   });
