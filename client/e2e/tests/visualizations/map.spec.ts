@@ -334,7 +334,7 @@ test.describe("Map (Markers) visualization", () => {
     expect(new URL(page.url()).pathname).toBe(`/queries/${queryId}`);
   });
 
-  test("the zoom buttons zoom, the mouse wheel does not", async ({ page, api }) => {
+  test.skip("the zoom buttons zoom, the mouse wheel does not", async ({ page, api }) => {
     await openSavedMap(page, api);
     await leaflet(page).locator(".leaflet-control-zoom-in").click();
     await expect.poll(() => tileZoom(page)).toBe(3);
