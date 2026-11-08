@@ -978,6 +978,10 @@ def next_state(op, value, threshold):
     return new_state
 
 
+# Marks an argument that was not passed, where None is a meaningful value.
+_UNSET = object()
+
+
 @generic_repr("id", "name", "query_id", "user_id", "state", "last_triggered_at", "rearm")
 class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
     UNKNOWN_STATE = "unknown"
@@ -1032,16 +1036,19 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
 
         return data["rows"][0][column]
 
-    def evaluate(self):
-        value = self.current_value()
+    def evaluate(self, value=_UNSET):
+        """Returns the state the alert's condition puts it in. Pass the result of `current_value()` to reuse it."""
+        if value is _UNSET:
+            value = self.current_value()
         if value is None:
             return self.UNKNOWN_STATE
 
         op = OPERATORS.get(self.options["op"], lambda v, t: False)
         return next_state(op, value, self.options["value"])
 
-    def record_state_change(self, previous_state, new_state, notified, trigger):
-        value = self.current_value()
+    def record_state_change(self, previous_state, new_state, notified, trigger, value=_UNSET):
+        if value is _UNSET:
+            value = self.current_value()
         change = AlertStateChange(
             alert=self,
             previous_state=previous_state,

@@ -56,6 +56,15 @@ class TestCheckAlertsForQueryHistory(BaseTestCase):
         self.assertEqual(change.trigger, AlertStateChange.SCHEDULED_TRIGGER)
         notify_subscriptions.assert_called_once()
 
+    def test_computes_alert_value_once(self, notify_subscriptions):
+        alert = self.factory.create_alert(state=Alert.OK_STATE)
+
+        with patch.object(Alert, "current_value", return_value=7) as current_value:
+            (change,) = self.check(alert, Alert.TRIGGERED_STATE)
+
+        current_value.assert_called_once()
+        self.assertEqual(change.value, "7")
+
     def test_records_state_change_of_muted_alert_as_not_notified(self, notify_subscriptions):
         alert = self.factory.create_alert(state=Alert.OK_STATE, options={"muted": True})
 

@@ -33,7 +33,8 @@ def check_alerts_for_query(query_id, metadata):
 
     for alert in query.alerts:
         logger.info("Checking alert (%d) of query %d.", alert.id, query_id)
-        new_state = alert.evaluate()
+        value = alert.current_value()
+        new_state = alert.evaluate(value)
 
         if should_notify(alert, new_state):
             logger.info("Alert %d new state: %s", alert.id, new_state)
@@ -53,6 +54,7 @@ def check_alerts_for_query(query_id, metadata):
                 new_state,
                 notified=skip_reason is None,
                 trigger=models.AlertStateChange.SCHEDULED_TRIGGER,
+                value=value,
             )
             models.db.session.commit()
 

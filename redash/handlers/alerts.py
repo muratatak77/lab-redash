@@ -61,13 +61,15 @@ class AlertEvaluateResource(BaseResource):
         require_admin_or_owner(alert.user.id)
         require_access(alert, self.current_user, view_only)
 
-        new_state = alert.evaluate()
+        value = alert.current_value()
+        new_state = alert.evaluate(value)
         if should_notify(alert, new_state):
             alert.record_state_change(
                 alert.state,
                 new_state,
                 notified=True,
                 trigger=models.AlertStateChange.MANUAL_TRIGGER,
+                value=value,
             )
             alert.state = new_state
             alert.last_triggered_at = utils.utcnow()

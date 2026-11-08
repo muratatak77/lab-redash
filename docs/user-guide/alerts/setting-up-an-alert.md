@@ -133,10 +133,11 @@ To resume notifications again, click the vertical ellipsis menu and choose _Unmu
 
 ## State History
 
-The alert page lists every time the alert changed status, most recent first. Each
-entry shows the previous and the new status, the value of the _Value Column_ at
-that moment, whether a notification was sent, and whether the change came from a
-query execution or from choosing _Evaluate_ in the vertical ellipsis (`⋮`) menu.
+The alert page lists every time the alert changed status, and every repeated
+notification sent while it stays `TRIGGERED`, most recent first. Each entry shows
+the previous and the new status, the value of the _Value Column_ at that moment,
+whether a notification was sent, and whether the change came from a query
+execution or from choosing _Evaluate_ in the vertical ellipsis (`⋮`) menu.
 
 Notifications are not sent for changes made while the alert is muted, nor for
 the first evaluation of a new alert when its status is `OK`. If the alert is set

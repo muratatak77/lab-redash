@@ -288,6 +288,30 @@ class TestAlertStateChanges(BaseTestCase):
 
         self.assertIsNone(change.value)
 
+    def test_record_state_change_reuses_given_value(self):
+        alert = self.create_alert(value=5)
+
+        with patch.object(Alert, "current_value") as current_value:
+            change = alert.record_state_change(
+                Alert.OK_STATE,
+                Alert.TRIGGERED_STATE,
+                notified=True,
+                trigger=AlertStateChange.SCHEDULED_TRIGGER,
+                value=7,
+            )
+
+        current_value.assert_not_called()
+        self.assertEqual(change.value, "7")
+
+    def test_evaluate_reuses_given_value(self):
+        alert = self.create_alert(value=5)
+
+        with patch.object(Alert, "current_value") as current_value:
+            self.assertEqual(alert.evaluate(0), Alert.OK_STATE)
+            self.assertEqual(alert.evaluate(None), Alert.UNKNOWN_STATE)
+
+        current_value.assert_not_called()
+
     def test_for_alert_returns_most_recent_first(self):
         alert = self.create_alert()
         other_alert = self.create_alert()
