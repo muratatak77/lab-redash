@@ -276,7 +276,7 @@ test.describe("Alert notifications", () => {
     );
     await alertMenu(page, "Evaluate");
     expect((await evaluated).status()).toBe(200);
-    await expect(toast(page)).toContainText("Alert evaluated.");
+    await expect(toast(page)).toContainText("Alert evaluated. Refresh page for updated status."); // changed on the base while this PR was open (1794138991)
 
     // The history has every state change, most recent first; none of them notified anyone. Evaluating
     // didn't change the state, so it added nothing.
