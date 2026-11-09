@@ -280,6 +280,10 @@ REDASH_ALERTS_DEFAULT_MAIL_BODY_TEMPLATE_FILE = os.environ.get(
     "REDASH_ALERTS_DEFAULT_MAIL_BODY_TEMPLATE_FILE", fix_assets_path("templates/emails/alert.html")
 )
 
+# How many state changes to keep per alert. Older entries are removed as new ones are recorded.
+# Set to 0 to keep the full history.
+ALERT_STATE_HISTORY_LIMIT = int(os.environ.get("REDASH_ALERT_STATE_HISTORY_LIMIT", "100"))
+
 # How many requests are allowed per IP to the login page before
 # being throttled?
 # See https://flask-limiter.readthedocs.io/en/stable/#rate-limit-string-notation

@@ -17,6 +17,7 @@ import Criteria from "./components/Criteria";
 import Rearm from "./components/Rearm";
 import Query from "./components/Query";
 import AlertDestinations from "./components/AlertDestinations";
+import AlertHistory from "./components/AlertHistory";
 import HorizontalFormItem from "./components/HorizontalFormItem";
 import { STATE_CLASS } from "../alerts/AlertsList";
 import DynamicComponent from "@/components/DynamicComponent";
@@ -60,7 +61,7 @@ export default class AlertView extends React.Component {
   };
 
   render() {
-    const { alert, queryResult, canEdit, onEdit, menuButton } = this.props;
+    const { alert, queryResult, canEdit, onEdit, menuButton, historyVersion } = this.props;
     const { query, name, options, rearm } = alert;
 
     return (
@@ -158,6 +159,8 @@ export default class AlertView extends React.Component {
               <AlertDestinations alertId={alert.id} />
             </Grid.Col>
           </Grid.Row>
+          <h4 className="m-t-20">State history</h4>
+          <AlertHistory alertId={alert.id} refreshKey={historyVersion} />
         </div>
       </>
     );
@@ -171,9 +174,11 @@ AlertView.propTypes = {
   onEdit: PropTypes.func.isRequired,
   menuButton: PropTypes.node.isRequired,
   unmute: PropTypes.func,
+  historyVersion: PropTypes.number,
 };
 
 AlertView.defaultProps = {
   queryResult: null,
   unmute: null,
+  historyVersion: 0,
 };

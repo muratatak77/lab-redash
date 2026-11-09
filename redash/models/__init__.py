@@ -978,6 +978,10 @@ def next_state(op, value, threshold):
     return new_state
 
 
+# Marks an argument that was not passed, where None is a meaningful value.
+_UNSET = object()
+
+
 @generic_repr("id", "name", "query_id", "user_id", "state", "last_triggered_at", "rearm")
 class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
     UNKNOWN_STATE = "unknown"
@@ -1012,41 +1016,55 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
     def get_by_id_and_org(cls, object_id, org):
         return super(Alert, cls).get_by_id_and_org(object_id, org, Query)
 
-    def evaluate(self):
+    def current_value(self):
+        """Returns the value the alert condition is checked against, or None when it can't be determined."""
         data = self.query_rel.latest_query_data.data if self.query_rel.latest_query_data else None
-        new_state = self.UNKNOWN_STATE
+        column = self.options.get("column")
 
-        if data and data["rows"] and self.options["column"] in data["rows"][0]:
-            op = OPERATORS.get(self.options["op"], lambda v, t: False)
+        if not (data and data["rows"] and column in data["rows"][0]):
+            return None
 
-            if "selector" not in self.options:
-                selector = "first"
-            else:
-                selector = self.options["selector"]
+        selector = self.options.get("selector", "first")
 
-            try:
-                if selector == "max":
-                    max_val = float("-inf")
-                    for i in range(len(data["rows"])):
-                        max_val = max(max_val, float(data["rows"][i][self.options["column"]]))
-                    value = max_val
-                elif selector == "min":
-                    min_val = float("inf")
-                    for i in range(len(data["rows"])):
-                        min_val = min(min_val, float(data["rows"][i][self.options["column"]]))
-                    value = min_val
-                else:
-                    value = data["rows"][0][self.options["column"]]
+        try:
+            if selector == "max":
+                return max(float(row[column]) for row in data["rows"])
+            if selector == "min":
+                return min(float(row[column]) for row in data["rows"])
+        except ValueError:
+            return None
 
-            except ValueError:
-                return self.UNKNOWN_STATE
+        return data["rows"][0][column]
 
-            threshold = self.options["value"]
+    def evaluate(self, value=_UNSET):
+        """Returns the state the alert's condition puts it in. Pass the result of `current_value()` to reuse it."""
+        if value is _UNSET:
+            value = self.current_value()
+        if value is None:
+            return self.UNKNOWN_STATE
 
-            if value is not None:
-                new_state = next_state(op, value, threshold)
+        op = OPERATORS.get(self.options["op"], lambda v, t: False)
+        return next_state(op, value, self.options["value"])
 
-        return new_state
+    def record_state_change(self, previous_state, new_state, notified, trigger, value=_UNSET):
+        """Adds an `AlertStateChange` for this alert, prunes old ones, and returns the new row.
+
+        Pass the result of `current_value()` as `value` to reuse it; otherwise it is computed here.
+        """
+        if value is _UNSET:
+            value = self.current_value()
+        change = AlertStateChange(
+            alert=self,
+            previous_state=previous_state,
+            new_state=new_state,
+            value=None if value is None else str(value),
+            notified=notified,
+            trigger=trigger,
+        )
+        db.session.add(change)
+        db.session.flush()
+        AlertStateChange.prune(self.id, settings.ALERT_STATE_HISTORY_LIMIT)
+        return change
 
     def subscribers(self):
         return User.query.join(AlertSubscription).filter(AlertSubscription.alert == self)
@@ -1100,6 +1118,53 @@ class Alert(TimestampMixin, BelongsToOrgMixin, db.Model):
     @property
     def muted(self):
         return self.options.get("muted", False)
+
+
+class AlertStateChange(db.Model):
+    SCHEDULED_TRIGGER = "scheduled"
+    MANUAL_TRIGGER = "manual"
+
+    id = primary_key("AlertStateChange")
+    alert_id = Column(key_type("Alert"), db.ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False)
+    alert = db.relationship(Alert)
+    previous_state = Column(db.String(255), nullable=False)
+    new_state = Column(db.String(255), nullable=False)
+    value = Column(db.Text, nullable=True)
+    notified = Column(db.Boolean, nullable=False, default=False)
+    trigger = Column(db.String(32), nullable=False, default=SCHEDULED_TRIGGER)
+    created_at = Column(db.DateTime(True), nullable=False, default=db.func.now())
+
+    __tablename__ = "alert_state_changes"
+    __table_args__ = (db.Index("alert_state_changes_alert_id_created_at", "alert_id", "created_at"),)
+
+    @classmethod
+    def for_alert(cls, alert_id):
+        """Returns a query over the alert's state changes, most recent first."""
+        return cls.query.filter(cls.alert_id == alert_id).order_by(cls.created_at.desc(), cls.id.desc())
+
+    @classmethod
+    def prune(cls, alert_id, keep):
+        """Removes all but the `keep` most recent state changes of an alert and returns how many were deleted."""
+        if keep <= 0:
+            return 0
+
+        newest = cls.for_alert(alert_id).with_entities(cls.id).limit(keep).subquery()
+        return cls.query.filter(cls.alert_id == alert_id, cls.id.notin_(db.session.query(newest.c.id))).delete(
+            synchronize_session=False
+        )
+
+    def to_dict(self):
+        """Returns the state change as a JSON-serializable dict."""
+        return {
+            "id": self.id,
+            "alert_id": self.alert_id,
+            "previous_state": self.previous_state,
+            "new_state": self.new_state,
+            "value": self.value,
+            "notified": self.notified,
+            "trigger": self.trigger,
+            "created_at": self.created_at,
+        }
 
 
 def generate_slug(ctx):
